@@ -158,7 +158,7 @@ The java-nats client is temporarily forked to support jruby > 9.2.10.0. The livi
 
 ## Contributing
 
-Bug reports and pull requests are welcome on GitHub at https://github.com/abrandoned/protobuf-nats.
+Bug reports and pull requests are welcome on GitHub at https://github.com/mxenabled/protobuf-nats.
 
 
 ## License
