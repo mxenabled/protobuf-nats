@@ -375,7 +375,7 @@ module Protobuf
           end
         end
 
-      elsif true
+      else
 
         def nats_request_with_two_responses(subject, data, opts)
           # Wait for the ACK from the server
@@ -421,59 +421,6 @@ module Protobuf
           response
         ensure
           req.cleanup if req
-        end
-
-      else
-
-        fail "no longer using this impl for MRI"
-
-        def nats_request_with_two_responses(subject, data, opts)
-          nats = Protobuf::Nats.client_nats_connection
-          inbox = nats.new_inbox
-          lock = ::Monitor.new
-          received = lock.new_cond
-          messages = []
-          first_message = nil
-          second_message = nil
-          response = nil
-
-          sid = nats.subscribe(inbox, :max => 2) do |message, _, _|
-            lock.synchronize do
-              messages << message
-              received.signal
-            end
-          end
-
-          lock.synchronize do
-            # Publish to server
-            nats.publish(subject, data, inbox)
-
-            # Wait for the ACK from the server
-            ack_timeout = opts[:ack_timeout] || 5
-            received.wait(ack_timeout) if messages.empty?
-            first_message = messages.shift
-
-            return :ack_timeout if first_message.nil?
-            return :nack if first_message == ::Protobuf::Nats::Messages::NACK
-
-            # Wait for the protobuf response
-            timeout = opts[:timeout] || 60
-            received.wait(timeout) if messages.empty?
-            second_message = messages.shift
-          end
-
-          response = case ::Protobuf::Nats::Messages::ACK
-                     when first_message then second_message
-                     when second_message then first_message
-                     else return :ack_timeout
-                     end
-
-          fail(::Protobuf::Nats::Errors::ResponseTimeout, formatted_service_and_method_name) unless response
-
-          response
-        ensure
-          # Ensure we don't leave a subscription sitting around.
-          nats.unsubscribe(sid) if response.nil?
         end
 
       end

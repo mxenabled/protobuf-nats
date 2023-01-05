@@ -12,33 +12,46 @@ module Protobuf
         @pending_queue = ::SizedQueue.new(::NATS::IO::DEFAULT_SUB_PENDING_MSGS_LIMIT)
         @subscriptions = []
         @nats = nats
+        @callback = cb
 
-        Thread.new do
+        # For MRI, reroute the pending queue to the callback
+        @pending_queue_handler = Thread.new do
           loop do
             msg = @pending_queue.pop
-            cb.call(msg.data, msg.reply)
+            @callback.call(msg.data, msg.reply)
           end
         end
       end
 
       def queue_subscribe(name)
-        sub = @nats.subscribe(name, :queue => name)
+        if defined? JRUBY_VERSION
+          @subscriptions << @nats.subscribe(name, :queue => name) do |request_data, reply_id|
+            @callback.call(request_data, reply_id)
+          end
+        else
+          sub = @nats.subscribe(name, :queue => name)
 
-        # Create a subscription but reset the pending queue to use a central pending queue.
-        # NOTE: This is a potential race condition. Chances of the round-trip message to an
-        # existing queue before this queue swap happens seems extremely low, but possible.
-        sub.pending_queue = @pending_queue
+          # Create a subscription but reset the pending queue to use a central pending queue.
+          # NOTE: This is a potential race condition. Chances of the round-trip message to an
+          # existing queue before this queue swap happens seems extremely low, but possible.
+          sub.pending_queue = @pending_queue
 
-        @subscriptions << sub
+          @subscriptions << sub
 
-        sub
+          sub
+        end
       end
 
       def unsubscribe_all
-        subscriptions.each { |sub| sub.unsubscribe }
+        if defined? JRUBY_VERSION
+          subscriptions.each do |subscription_id|
+            @nats.unsubscribe(subscription_id)
+          end
+        else
+          subscriptions.each { |sub| sub.unsubscribe }
+        end
       end
     end
-
 
     class Server
       include ::Protobuf::Rpc::Server
