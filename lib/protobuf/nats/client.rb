@@ -250,6 +250,103 @@ module Protobuf
           end
         end
 
+      if false
+
+        def nats_request_with_two_responses(subject, data, opts)
+          # Wait for the ACK from the server
+          ack_timeout = opts[:ack_timeout] || 5
+          # Wait for the protobuf response
+          timeout = opts[:timeout] || 60
+
+          nats = Protobuf::Nats.client_nats_connection
+
+          # Cheap check first before synchronize
+          unless @resp_sub_prefix
+            synchronize do
+              # TODO: This needs to be global, yo.
+              start_request_muxer! unless @resp_sub_prefix
+            end
+          end
+
+          # Publish message with the reply topic pointed at the response muxer.
+          token = nats.new_inbox
+          signal = @resp_sub.new_cond
+          @resp_sub.synchronize do
+            @resp_map[token][:signal] = signal
+          end
+          reply_to = "#{@resp_inbox_prefix}.#{token}"
+          nats.publish(subject, data, reply_to)
+
+          # Wait for reply
+
+          # Receive the first message
+          ::MonotonicTime::with_nats_timeout(ack_timeout) do
+            @resp_sub.synchronize do
+              signal.wait(ack_timeout)
+            end
+          rescue ::NATS::Timeout => e
+            return :ack_timeout
+          end
+
+          # Check for a NACK
+          first_message = @resp_sub.synchronize { @resp_map[token][:response].shift }
+          return :nack if first_message.data == ::Protobuf::Nats::Messages::NACK
+
+          # Receive the second message
+          ::MonotonicTime::with_nats_timeout(timeout) do
+            @resp_sub.synchronize do
+              signal.wait(timeout)
+            end
+          rescue ::NATS::Timeout => e
+            fail ::Protobuf::Nats::Errors::ResponseTimeout, formatted_service_and_method_name
+          end
+
+          second_message = @resp_sub.synchronize { @resp_map[token][:response].shift }
+
+          # Check messages
+          response = case ::Protobuf::Nats::Messages::ACK
+                     when first_message.data then second_message.data
+                     when second_message.data then first_message.data
+                     else return :ack_timeout
+                     end
+
+          response
+        ensure
+          cleanup_muxer_topic(topic) if topic
+        end
+
+        def cleanup_muxer_topic(topic)
+          @resp_sub.synchronize do
+            @resp_map.delete(token)
+          end
+        end
+
+        def start_request_muxer!
+          nats = Protobuf::Nats.client_nats_connection
+          @resp_inbox_prefix = nats.new_inbox
+          @resp_map = Hash.new { |h,k| h[k] = { } }
+          @resp_sub = nats.subscribe("#{@resp_inbox_prefix}.*")
+
+          Thread.new do
+            loop do
+              msg = @resp_sub.pending_queue.pop
+              next if msg.nil?
+              @resp_sub.synchronize do
+                # Decrease pending size since consumed already
+                @resp_sub.pending_size -= msg.data.size
+              end
+              token = msg.subject.split('.').last
+
+              @resp_sub.synchronize do
+                future = @resp_map[token][:signal]
+                @resp_map[token][:response] ||= []
+                @resp_map[token][:response] << msg
+                future.signal
+              end
+            end
+          end
+        end
+
       else
 
         def nats_request_with_two_responses(subject, data, opts)
