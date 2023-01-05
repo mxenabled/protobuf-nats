@@ -26,6 +26,7 @@ class FakeNatsClient
 
   def subscribe(subject, args, &block)
     subscriptions[subject] = block
+    ::NATS::Subscription.new
   end
 
   def unsubscribe(*)

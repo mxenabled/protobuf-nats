@@ -6,6 +6,9 @@ require "monitor"
 module Protobuf
   module Nats
     class Client < ::Protobuf::Rpc::Connectors::Base
+
+      CLIENT_MUTEX = ::Mutex.new
+
       # Structure to hold subscription and inbox to use within pool
       SubscriptionInbox = ::Struct.new(:subscription, :inbox) do
         def swap(sub_inbox)
@@ -250,7 +253,7 @@ module Protobuf
           end
         end
 
-      if false
+      elsif true
 
         def nats_request_with_two_responses(subject, data, opts)
           # Wait for the ACK from the server
@@ -262,7 +265,7 @@ module Protobuf
 
           # Cheap check first before synchronize
           unless @resp_sub_prefix
-            synchronize do
+            CLIENT_MUTEX.synchronize do
               # TODO: This needs to be global, yo.
               start_request_muxer! unless @resp_sub_prefix
             end
@@ -303,6 +306,9 @@ module Protobuf
 
           second_message = @resp_sub.synchronize { @resp_map[token][:response].shift }
 
+          require "pry"; binding.pry
+
+
           # Check messages
           response = case ::Protobuf::Nats::Messages::ACK
                      when first_message.data then second_message.data
@@ -312,10 +318,9 @@ module Protobuf
 
           response
         ensure
-          cleanup_muxer_topic(topic) if topic
-        end
+          return if @resp_sub.nil?
 
-        def cleanup_muxer_topic(topic)
+          # Clean up
           @resp_sub.synchronize do
             @resp_map.delete(token)
           end
@@ -348,6 +353,8 @@ module Protobuf
         end
 
       else
+
+        fail "barf"
 
         def nats_request_with_two_responses(subject, data, opts)
           nats = Protobuf::Nats.client_nats_connection
