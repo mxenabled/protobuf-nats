@@ -24,9 +24,13 @@ class FakeNatsClient
   def flush
   end
 
-  def subscribe(subject, args, &block)
-    subscriptions[subject] = block
-    ::NATS::Subscription.new
+  def subscribe(subject, args = {}, &block)
+    s = ::NATS::Subscription.new
+    s.pending_queue = ::SizedQueue.new(1024)
+
+    subscriptions[subject] = {:block => block, :subscription => s }
+
+    s
   end
 
   def unsubscribe(*)
@@ -48,9 +52,15 @@ class FakeNatsClient
       Thread.new do
         begin
           sleep message.seconds_in_future
-          block = subscriptions[message.subject]
+
+          sub = subscriptions[message.subject] ||
+            subscriptions[message.subject.split(".").first + ".*"]
+
+          block = sub[:block]
           block.call(message.data) if block
           @next_message = message
+          s = sub[:subscription]
+          s.pending_queue.push(message) if s.pending_queue
         rescue => error
           puts error
         end
@@ -60,8 +70,14 @@ class FakeNatsClient
 end
 
 class FakeNackClient < FakeNatsClient
-  def subscribe(subject, args, &block)
-    Thread.new { block.call(::Protobuf::Nats::Messages::NACK) }
+  def subscribe(subject, args = {}, &block)
+    s = super
+
+    Thread.new { block.call(::Protobuf::Nats::Messages::NACK) } if block
+
+    s.pending_queue.push(NATS::Msg.new(:data => ::Protobuf::Nats::Messages::NACK, :subject => "BASE.#{@inbox}"))
+
+    s
   end
 
   def next_message(_sub, _timeout)

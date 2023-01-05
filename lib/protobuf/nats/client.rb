@@ -283,9 +283,11 @@ module Protobuf
           # Wait for reply
 
           # Receive the first message
-          ::MonotonicTime::with_nats_timeout(ack_timeout) do
-            @resp_sub.synchronize do
-              signal.wait(ack_timeout)
+          begin
+            ::NATS::MonotonicTime::with_nats_timeout(ack_timeout) do
+              @resp_sub.synchronize do
+                signal.wait(ack_timeout)
+              end
             end
           rescue ::NATS::Timeout => e
             return :ack_timeout
@@ -296,25 +298,27 @@ module Protobuf
           return :nack if first_message.data == ::Protobuf::Nats::Messages::NACK
 
           # Receive the second message
-          ::MonotonicTime::with_nats_timeout(timeout) do
-            @resp_sub.synchronize do
-              signal.wait(timeout)
+          begin
+            ::NATS::MonotonicTime::with_nats_timeout(timeout) do
+              @resp_sub.synchronize do
+                signal.wait(timeout)
+              end
             end
-          rescue ::NATS::Timeout => e
-            fail ::Protobuf::Nats::Errors::ResponseTimeout, formatted_service_and_method_name
+          rescue ::NATS::Timeout
+            # ignore to raise a repsonse timeout below
           end
 
-          second_message = @resp_sub.synchronize { @resp_map[token][:response].shift }
-
-          require "pry"; binding.pry
-
+          # NOTE: This might be nil, so be careful checking the data value
+          second_message_data = @resp_sub.synchronize { @resp_map[token][:response].shift }&.data
 
           # Check messages
           response = case ::Protobuf::Nats::Messages::ACK
-                     when first_message.data then second_message.data
-                     when second_message.data then first_message.data
+                     when first_message.data then second_message_data
+                     when second_message_data then first_message.data
                      else return :ack_timeout
                      end
+
+          fail(::Protobuf::Nats::Errors::ResponseTimeout, formatted_service_and_method_name) unless response
 
           response
         ensure
@@ -343,6 +347,9 @@ module Protobuf
               token = msg.subject.split('.').last
 
               @resp_sub.synchronize do
+                # Reject if the token is missing from the request map
+                next unless @resp_map.key?(token)
+
                 future = @resp_map[token][:signal]
                 @resp_map[token][:response] ||= []
                 @resp_map[token][:response] << msg
@@ -354,7 +361,7 @@ module Protobuf
 
       else
 
-        fail "barf"
+        fail "no longer using this impl for MRI"
 
         def nats_request_with_two_responses(subject, data, opts)
           nats = Protobuf::Nats.client_nats_connection
