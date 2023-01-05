@@ -17,6 +17,8 @@ RSpec.configure do |config|
   end
 
   config.before(:each) do
-    allow(Protobuf::Nats).to receive(:start_client_nats_connection)
+    allow(::Protobuf::Nats).to receive(:start_client_nats_connection)
+
+    ::Protobuf::Nats::Client::RESPONSE_MUXER.restart
   end
 end

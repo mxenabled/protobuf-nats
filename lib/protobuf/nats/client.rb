@@ -6,10 +6,9 @@ require "monitor"
 module Protobuf
   module Nats
     class ResponseMuxerRequest
-      def initialize(muxer, token, signal)
+      def initialize(muxer, token)
         @muxer = muxer
         @token = token
-        @signal = signal
       end
 
       def publish(subject, data)
@@ -52,18 +51,28 @@ module Protobuf
       def new_request
         nats = Protobuf::Nats.client_nats_connection
         token = nats.new_inbox.split('.').last
-        signal = @resp_sub.new_cond
         @resp_sub.synchronize do
-          @resp_map[token][:signal] = signal
+          @resp_map[token][:signal] = @resp_sub.new_cond
         end
 
-        ResponseMuxerRequest.new(self, token, signal)
+        ResponseMuxerRequest.new(self, token)
       end
 
       def publish(subject, data, token)
         nats = Protobuf::Nats.client_nats_connection
         reply_to = "#{@resp_inbox_prefix}.#{token}"
         nats.publish(subject, data, reply_to)
+      end
+
+      def restart
+        start unless started?
+
+        LOCK.synchronize do
+          @resp_handler&.kill
+          @started = false
+        end
+
+        start
       end
 
       def start
@@ -81,7 +90,7 @@ module Protobuf
           @started = true
         end
 
-        Thread.new do
+        @resp_handler = Thread.new do
           loop do
             msg = @resp_sub.pending_queue.pop
             next if msg.nil?
