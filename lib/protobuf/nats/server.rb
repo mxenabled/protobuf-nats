@@ -59,7 +59,10 @@ module Protobuf
 
         @thread_pool = ::Protobuf::Nats::ThreadPool.new(@options[:threads], :max_queue => max_queue_size)
 
-        @subscription_manager = SuperSubscriptionManager.new(@nats) do
+        @subscription_manager = SuperSubscriptionManager.new(@nats) do |request_data, reply_id|
+          unless enqueue_request(request_data, reply_id)
+            logger.error { "Thread pool is full! Dropping message for: #{subscription_key_and_queue}" }
+          end
         end
         @server = options.fetch(:server, ::Socket.gethostname)
       end
@@ -149,11 +152,7 @@ module Protobuf
 
       def subscribe_to_services_once
         with_each_subscription_key do |subscription_key_and_queue|
-          subscription_manager.queue_subscribe(subscription_key_and_queue) do |request_data, reply_id|
-            unless enqueue_request(request_data, reply_id)
-              logger.error { "Thread pool is full! Dropping message for: #{subscription_key_and_queue}" }
-            end
-          end
+          subscription_manager.queue_subscribe(subscription_key_and_queue)
         end
       end
 

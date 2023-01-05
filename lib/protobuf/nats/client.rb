@@ -5,9 +5,114 @@ require "monitor"
 
 module Protobuf
   module Nats
+    class ResponseMuxerRequest
+      def initialize(muxer, token, signal)
+        @muxer = muxer
+        @token = token
+        @signal = signal
+      end
+
+      def publish(subject, data)
+        @muxer.publish(subject, data, @token)
+      end
+
+      def next_message(timeout)
+        @muxer.next_message(@token, timeout)
+      end
+
+      def cleanup
+        @muxer.cleanup(@token)
+      end
+    end
+
+    class ResponseMuxer
+      LOCK = ::Mutex.new
+
+      def initialize
+        @resp_map = Hash.new { |h,k| h[k] = { } }
+      end
+
+      def cleanup(token)
+        @resp_sub.synchronize { @resp_map.delete(token) }
+      end
+
+      def next_message(token, timeout)
+        ::NATS::MonotonicTime::with_nats_timeout(timeout) do
+          @resp_sub.synchronize do
+            break if @resp_map[token].key?(:response) &&
+              !@resp_map[token][:response].empty?
+
+            @resp_map[token][:signal].wait(timeout)
+          end
+        end
+
+        @resp_sub.synchronize { @resp_map[token][:response].shift }
+      end
+
+      def new_request
+        nats = Protobuf::Nats.client_nats_connection
+        token = nats.new_inbox.split('.').last
+        signal = @resp_sub.new_cond
+        @resp_sub.synchronize do
+          @resp_map[token][:signal] = signal
+        end
+
+        ResponseMuxerRequest.new(self, token, signal)
+      end
+
+      def publish(subject, data, token)
+        nats = Protobuf::Nats.client_nats_connection
+        reply_to = "#{@resp_inbox_prefix}.#{token}"
+        nats.publish(subject, data, reply_to)
+      end
+
+      def start
+        return if started?
+        LOCK.synchronize do
+          # We check this twice in case another thread was waiting for the lock to
+          # start this party.
+          return if started?
+
+          nats = ::Protobuf::Nats.client_nats_connection
+          return if nats.nil?
+
+          @resp_inbox_prefix = nats.new_inbox
+          @resp_sub = nats.subscribe("#{@resp_inbox_prefix}.*")
+          @started = true
+        end
+
+        Thread.new do
+          loop do
+            msg = @resp_sub.pending_queue.pop
+            next if msg.nil?
+            @resp_sub.synchronize do
+              # Decrease pending size since consumed already
+              @resp_sub.pending_size -= msg.data.size
+            end
+            token = msg.subject.split('.').last
+
+            @resp_sub.synchronize do
+              # Reject if the token is missing from the request map
+              break unless @resp_map.key?(token)
+
+              signal = @resp_map[token][:signal]
+              @resp_map[token][:response] ||= []
+              @resp_map[token][:response] << msg
+              signal.signal
+            end
+          end
+        end
+      end
+
+      def started?
+        !!@started
+      end
+    end
+
     class Client < ::Protobuf::Rpc::Connectors::Base
 
       CLIENT_MUTEX = ::Mutex.new
+      RESPONSE_MUXER = ResponseMuxer.new
 
       # Structure to hold subscription and inbox to use within pool
       SubscriptionInbox = ::Struct.new(:subscription, :inbox) do
@@ -39,6 +144,9 @@ module Protobuf
 
         # This will ensure the client is started.
         ::Protobuf::Nats.start_client_nats_connection
+
+        # Ensure the response muxer is started
+        RESPONSE_MUXER.start
       end
 
       def new_subscription_inbox
@@ -263,53 +371,29 @@ module Protobuf
 
           nats = Protobuf::Nats.client_nats_connection
 
-          # Cheap check first before synchronize
-          unless @resp_sub_prefix
-            CLIENT_MUTEX.synchronize do
-              # TODO: This needs to be global, yo.
-              start_request_muxer! unless @resp_sub_prefix
-            end
-          end
-
           # Publish message with the reply topic pointed at the response muxer.
-          token = nats.new_inbox
-          signal = @resp_sub.new_cond
-          @resp_sub.synchronize do
-            @resp_map[token][:signal] = signal
-          end
-          reply_to = "#{@resp_inbox_prefix}.#{token}"
-          nats.publish(subject, data, reply_to)
-
-          # Wait for reply
+          req = RESPONSE_MUXER.new_request
+          req.publish(subject, data)
 
           # Receive the first message
           begin
-            ::NATS::MonotonicTime::with_nats_timeout(ack_timeout) do
-              @resp_sub.synchronize do
-                signal.wait(ack_timeout)
-              end
-            end
+            first_message = req.next_message(ack_timeout)
           rescue ::NATS::Timeout => e
             return :ack_timeout
           end
 
           # Check for a NACK
-          first_message = @resp_sub.synchronize { @resp_map[token][:response].shift }
           return :nack if first_message.data == ::Protobuf::Nats::Messages::NACK
 
           # Receive the second message
           begin
-            ::NATS::MonotonicTime::with_nats_timeout(timeout) do
-              @resp_sub.synchronize do
-                signal.wait(timeout)
-              end
-            end
+            second_message = req.next_message(timeout)
           rescue ::NATS::Timeout
             # ignore to raise a repsonse timeout below
           end
 
           # NOTE: This might be nil, so be careful checking the data value
-          second_message_data = @resp_sub.synchronize { @resp_map[token][:response].shift }&.data
+          second_message_data = second_message&.data
 
           # Check messages
           response = case ::Protobuf::Nats::Messages::ACK
@@ -322,41 +406,7 @@ module Protobuf
 
           response
         ensure
-          return if @resp_sub.nil?
-
-          # Clean up
-          @resp_sub.synchronize do
-            @resp_map.delete(token)
-          end
-        end
-
-        def start_request_muxer!
-          nats = Protobuf::Nats.client_nats_connection
-          @resp_inbox_prefix = nats.new_inbox
-          @resp_map = Hash.new { |h,k| h[k] = { } }
-          @resp_sub = nats.subscribe("#{@resp_inbox_prefix}.*")
-
-          Thread.new do
-            loop do
-              msg = @resp_sub.pending_queue.pop
-              next if msg.nil?
-              @resp_sub.synchronize do
-                # Decrease pending size since consumed already
-                @resp_sub.pending_size -= msg.data.size
-              end
-              token = msg.subject.split('.').last
-
-              @resp_sub.synchronize do
-                # Reject if the token is missing from the request map
-                next unless @resp_map.key?(token)
-
-                future = @resp_map[token][:signal]
-                @resp_map[token][:response] ||= []
-                @resp_map[token][:response] << msg
-                future.signal
-              end
-            end
-          end
+          req.cleanup if req
         end
 
       else

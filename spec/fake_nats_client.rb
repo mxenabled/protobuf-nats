@@ -70,12 +70,19 @@ class FakeNatsClient
 end
 
 class FakeNackClient < FakeNatsClient
+  def publish(*)
+    subscriptions.each do |_key, sub|
+      s = sub[:subscription]
+      s.pending_queue.push(NATS::Msg.new(:data => ::Protobuf::Nats::Messages::NACK, :subject => "BASE.#{@inbox}"))
+    end
+  end
+
   def subscribe(subject, args = {}, &block)
     s = super
 
-    Thread.new { block.call(::Protobuf::Nats::Messages::NACK) } if block
-
-    s.pending_queue.push(NATS::Msg.new(:data => ::Protobuf::Nats::Messages::NACK, :subject => "BASE.#{@inbox}"))
+    Thread.new do
+      block.call(::Protobuf::Nats::Messages::NACK) if block
+    end
 
     s
   end
