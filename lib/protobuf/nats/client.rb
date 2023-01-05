@@ -91,23 +91,28 @@ module Protobuf
         end
 
         @resp_handler = Thread.new do
-          loop do
-            msg = @resp_sub.pending_queue.pop
-            next if msg.nil?
-            @resp_sub.synchronize do
-              # Decrease pending size since consumed already
-              @resp_sub.pending_size -= msg.data.size
-            end
-            token = msg.subject.split('.').last
+          begin
+            loop do
+              msg = @resp_sub.pending_queue.pop
+              next if msg.nil?
+              @resp_sub.synchronize do
+                # Decrease pending size since consumed already
+                @resp_sub.pending_size -= msg.data.size
+              end
+              token = msg.subject.split('.').last
 
-            @resp_sub.synchronize do
-              # Reject if the token is missing from the request map
-              break unless @resp_map.key?(token)
+              @resp_sub.synchronize do
+                # Reject if the token is missing from the request map
+                break unless @resp_map.key?(token)
 
-              signal = @resp_map[token][:signal]
-              @resp_map[token][:response] ||= []
-              @resp_map[token][:response] << msg
-              signal.signal
+                signal = @resp_map[token][:signal]
+                @resp_map[token][:response] ||= []
+                @resp_map[token][:response] << msg
+                signal.signal
+              end
+            rescue => error
+              ::Protobuf::Nats.notify_error_callbacks(error)
+              LOCK.synchronize { @started = false }
             end
           end
         end
