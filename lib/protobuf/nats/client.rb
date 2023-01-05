@@ -126,7 +126,6 @@ module Protobuf
 
     class Client < ::Protobuf::Rpc::Connectors::Base
 
-      CLIENT_MUTEX = ::Mutex.new
       RESPONSE_MUXER = ResponseMuxer.new
 
       # Structure to hold subscription and inbox to use within pool
