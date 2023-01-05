@@ -1,6 +1,6 @@
 require "rspec"
 
-if defined?(JRUBY_VERSION)
+if ::Protobuf::Nats.jruby?
   require "protobuf/nats/jnats"
 
   describe ::Protobuf::Nats::JNats do

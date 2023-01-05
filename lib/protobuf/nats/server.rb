@@ -24,7 +24,7 @@ module Protobuf
       end
 
       def queue_subscribe(name)
-        if defined? JRUBY_VERSION
+        if ::Protobuf::Nats.jruby?
           @subscriptions << @nats.subscribe(name, :queue => name) do |request_data, reply_id|
             @callback.call(request_data, reply_id)
           end
@@ -43,12 +43,12 @@ module Protobuf
       end
 
       def unsubscribe_all
-        if defined? JRUBY_VERSION
-          subscriptions.each do |subscription_id|
+        if ::Protobuf::Nats.jruby?
+          @subscriptions.each do |subscription_id|
             @nats.unsubscribe(subscription_id)
           end
         else
-          subscriptions.each { |sub| sub.unsubscribe }
+          @subscriptions.each { |sub| sub.unsubscribe }
         end
       end
     end

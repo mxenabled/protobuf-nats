@@ -1,5 +1,6 @@
 require "connection_pool"
 require "protobuf/nats"
+require "protobuf/nats/platform"
 require "protobuf/rpc/connectors/base"
 require "monitor"
 
@@ -320,7 +321,7 @@ module Protobuf
       # The Java nats client offers better message queueing so we're going to use
       # that over locking ourselves. This split in code isn't great, but we can
       # refactor this later.
-      if defined? JRUBY_VERSION
+      if ::Protobuf::Nats.jruby?
 
         # This is a request that expects two responses.
         # 1. An ACK from the server. We use a shorter timeout.

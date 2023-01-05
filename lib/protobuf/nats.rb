@@ -6,6 +6,7 @@ require "protobuf/rpc/service_directory"
 
 require "nats/io/client"
 
+require "protobuf/nats/platform"
 require "protobuf/nats/errors"
 require "protobuf/nats/client"
 require "protobuf/nats/server"
@@ -23,7 +24,7 @@ module Protobuf
       NACK = "\2".freeze
     end
 
-    NatsClient = if defined? JRUBY_VERSION
+    NatsClient = if jruby?
                    require "protobuf/nats/jnats"
                    ::Protobuf::Nats::JNats
                  else
