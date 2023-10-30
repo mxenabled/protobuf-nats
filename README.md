@@ -2,6 +2,7 @@ Protobuf::Nats
 ==============
 
 An rpc client and server library built using the `protobuf` gem and the NATS protocol.
+
 ## Installation
 
 Add this line to your application's Gemfile:
