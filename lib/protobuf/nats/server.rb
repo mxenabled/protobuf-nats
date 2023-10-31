@@ -6,11 +6,58 @@ require "protobuf/nats/thread_pool"
 
 module Protobuf
   module Nats
+    class SuperSubscriptionManager
+      def initialize(nats, &cb)
+        # Central queue used by all subscriptions
+        @pending_queue = ::SizedQueue.new(::NATS::IO::DEFAULT_SUB_PENDING_MSGS_LIMIT)
+        @subscriptions = []
+        @nats = nats
+        @callback = cb
+
+        # For MRI, reroute the pending queue to the callback
+        @pending_queue_handler = Thread.new do
+          loop do
+            msg = @pending_queue.pop
+            @callback.call(msg.data, msg.reply)
+          end
+        end
+      end
+
+      def queue_subscribe(name)
+        if ::Protobuf::Nats.jruby?
+          @subscriptions << @nats.subscribe(name, :queue => name) do |request_data, reply_id|
+            @callback.call(request_data, reply_id)
+          end
+        else
+          sub = @nats.subscribe(name, :queue => name)
+
+          # Create a subscription but reset the pending queue to use a central pending queue.
+          # NOTE: This is a potential race condition. Chances of the round-trip message to an
+          # existing queue before this queue swap happens seems extremely low, but possible.
+          sub.pending_queue = @pending_queue
+
+          @subscriptions << sub
+
+          sub
+        end
+      end
+
+      def unsubscribe_all
+        if ::Protobuf::Nats.jruby?
+          @subscriptions.each do |subscription_id|
+            @nats.unsubscribe(subscription_id)
+          end
+        else
+          @subscriptions.each { |sub| sub.unsubscribe }
+        end
+      end
+    end
+
     class Server
       include ::Protobuf::Rpc::Server
       include ::Protobuf::Logging
 
-      attr_reader :nats, :thread_pool, :subscriptions
+      attr_reader :nats, :thread_pool, :subscription_manager
 
       MILLISECOND = 1000
 
@@ -25,7 +72,11 @@ module Protobuf
 
         @thread_pool = ::Protobuf::Nats::ThreadPool.new(@options[:threads], :max_queue => max_queue_size)
 
-        @subscriptions = []
+        @subscription_manager = SuperSubscriptionManager.new(@nats) do |request_data, reply_id|
+          unless enqueue_request(request_data, reply_id)
+            logger.error { "Thread pool is full! Dropping message for: #{subscription_key_and_queue}" }
+          end
+        end
         @server = options.fetch(:server, ::Socket.gethostname)
       end
 
@@ -114,11 +165,7 @@ module Protobuf
 
       def subscribe_to_services_once
         with_each_subscription_key do |subscription_key_and_queue|
-          subscriptions << nats.subscribe(subscription_key_and_queue, :queue => subscription_key_and_queue) do |request_data, reply_id, _subject|
-            unless enqueue_request(request_data, reply_id)
-              logger.error { "Thread pool is full! Dropping message for: #{subscription_key_and_queue}" }
-            end
-          end
+          subscription_manager.queue_subscribe(subscription_key_and_queue)
         end
       end
 
@@ -233,9 +280,7 @@ module Protobuf
 
       def unsubscribe
         logger.info "Unsubscribing from rpc routes..."
-        subscriptions.each do |subscription_id|
-          nats.unsubscribe(subscription_id)
-        end
+        subscription_manager.unsubscribe_all
       end
     end
   end
