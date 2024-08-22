@@ -22,8 +22,16 @@ module Protobuf
         supervise_workers
       end
 
+      def enqueued_size
+        @queue.size
+      end
+
       def full?
         @active_work >= @max_size
+      end
+
+      def max_size
+        @max_size
       end
 
       # This method is not thread safe by design since our IO model is a single producer thread

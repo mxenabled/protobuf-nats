@@ -309,5 +309,47 @@ describe ::Protobuf::Nats::Server do
       expect(message_was_dropped).to eq(true)
       ::ActiveSupport::Notifications.unsubscribe(subscription)
     end
+
+    it "instruments the thread pool enqueued size" do
+      expect(subject).to receive(:handle_request).and_return("response")
+      enqueued_size = nil
+      subscription = ::ActiveSupport::Notifications.subscribe "server.thread_pool_enqueued_size.protobuf-nats" do |_, _, _, _, size|
+        enqueued_size = size
+      end
+
+      subject.enqueue_request("", "YOLO123")
+      sleep 0.1 until subject.thread_pool.size.zero?
+
+      expect(enqueued_size).to_not eq(nil)
+      ::ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+
+    it "instruments the thread pool max size" do
+      expect(subject).to receive(:handle_request).and_return("response")
+      max_size = nil
+      subscription = ::ActiveSupport::Notifications.subscribe "server.thread_pool_max_size.protobuf-nats" do |_, _, _, _, size|
+        max_size = size
+      end
+
+      subject.enqueue_request("", "YOLO123")
+      sleep 0.1 until subject.thread_pool.size.zero?
+
+      expect(max_size).to_not eq(nil)
+      ::ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+
+    it "instruments the thread pool running size" do
+      expect(subject).to receive(:handle_request).and_return("response")
+      running_size = nil
+      subscription = ::ActiveSupport::Notifications.subscribe "server.thread_pool_running_size.protobuf-nats" do |_, _, _, _, size|
+        running_size = size
+      end
+
+      subject.enqueue_request("", "YOLO123")
+      sleep 0.1 until subject.thread_pool.size.zero?
+
+      expect(running_size).to_not eq(nil)
+      ::ActiveSupport::Notifications.unsubscribe(subscription)
+    end
   end
 end

@@ -56,6 +56,10 @@ module Protobuf
             ::ActiveSupport::Notifications.instrument("server.thread_pool_execution_delay.protobuf-nats",
                                                       (processed_at - enqueued_at) * MILLISECOND)
 
+            ::ActiveSupport::Notifications.instrument("server.thread_pool_enqueued_size.protobuf-nats", thread_pool.enqueued_size)
+            ::ActiveSupport::Notifications.instrument("server.thread_pool_max_size.protobuf-nats", thread_pool.max_size)
+            ::ActiveSupport::Notifications.instrument("server.thread_pool_running_size.protobuf-nats", thread_pool.size)
+
             # Process request.
             response_data = handle_request(request_data, 'server' => @server)
             # Publish response.
