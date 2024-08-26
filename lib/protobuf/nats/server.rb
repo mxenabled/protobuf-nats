@@ -29,6 +29,12 @@ module Protobuf
         @server = options.fetch(:server, ::Socket.gethostname)
       end
 
+      def instrument_thread_pool_sizes
+        ::ActiveSupport::Notifications.instrument("server.thread_pool_enqueued_size.protobuf-nats", thread_pool.enqueued_size)
+        ::ActiveSupport::Notifications.instrument("server.thread_pool_max_size.protobuf-nats", thread_pool.max_size)
+        ::ActiveSupport::Notifications.instrument("server.thread_pool_running_size.protobuf-nats", thread_pool.size)
+      end
+
       def max_queue_size
         ::ENV.fetch("PB_NATS_SERVER_MAX_QUEUE_SIZE", @options[:threads]).to_i
       end
@@ -55,10 +61,6 @@ module Protobuf
             processed_at = ::Time.now
             ::ActiveSupport::Notifications.instrument("server.thread_pool_execution_delay.protobuf-nats",
                                                       (processed_at - enqueued_at) * MILLISECOND)
-
-            ::ActiveSupport::Notifications.instrument("server.thread_pool_enqueued_size.protobuf-nats", thread_pool.enqueued_size)
-            ::ActiveSupport::Notifications.instrument("server.thread_pool_max_size.protobuf-nats", thread_pool.max_size)
-            ::ActiveSupport::Notifications.instrument("server.thread_pool_running_size.protobuf-nats", thread_pool.size)
 
             # Process request.
             response_data = handle_request(request_data, 'server' => @server)
@@ -209,6 +211,7 @@ module Protobuf
         loop do
           break unless @running
           detect_and_handle_a_pause
+          instrument_thread_pool_sizes
           sleep 1
         end
 
