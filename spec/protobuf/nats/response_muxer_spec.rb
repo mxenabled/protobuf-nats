@@ -190,11 +190,11 @@ describe ::Protobuf::Nats::ResponseMuxer do
 
     describe "unstarted / failed start state" do
       it "does not raise NoMethodError on nil when calling new_request before start" do
-        expect { subject.new_request }.not_to raise_error(NoMethodError)
+        expect { subject.new_request }.not_to raise_error
       end
 
       it "does not raise NoMethodError on nil when calling cleanup before start" do
-        expect { subject.cleanup("token") }.not_to raise_error(NoMethodError)
+        expect { subject.cleanup("token") }.not_to raise_error
       end
     end
 
@@ -214,6 +214,58 @@ describe ::Protobuf::Nats::ResponseMuxer do
 
         handlers = subject.instance_variable_get(:@resp_handlers)
         expect(handlers.any? { |t| !t.alive? }).to be(false)
+      end
+
+      # Several dispatchers that crash together wake on DIFFERENT backoffs
+      # (1s, then 4s...). The late one used to tear down unconditionally,
+      # destroying the subscription the earlier one had just rebuilt and, via
+      # fail_inflight_requests, cancelling every request already waiting on it.
+      it "does not tear down a subscription another dispatcher already rebuilt" do
+        crashing_sub = nats_client.subscribe("test.subscription")
+        # Build the stand-in for the sibling's rebuilt subscription BEFORE the
+        # stub below, or `subscribe` would hand back crashing_sub itself and the
+        # two would be the same object (making the identity check trivially true).
+        healed_sub = nats_client.subscribe("healed.subscription")
+        queue = crashing_sub.pending_queue
+        allow(nats_client).to receive(:subscribe).and_return(crashing_sub)
+        # Long enough to swap in the "healed" subscription mid-backoff.
+        allow(::Protobuf::Nats).to receive(:crash_backoff_seconds).and_return(0.3)
+
+        raised = false
+        allow(queue).to receive(:pop) do
+          unless raised
+            raised = true
+            raise ::ThreadError, "Queue closed" # fatal: kills the dispatch loop
+          end
+          sleep 0.01
+          nil
+        end
+
+        subject.send(:start)
+        crashed = subject.instance_variable_get(:@resp_handlers).first
+
+        # Stand in for a sibling that already healed the muxer: a DIFFERENT
+        # subscription object is now current, with a live in-flight token on it.
+        expect(healed_sub).not_to equal(crashing_sub)
+        allow(healed_sub.pending_queue).to receive(:pop) { sleep 0.01; nil }
+        subject.instance_variable_set(:@resp_sub, healed_sub)
+        subject.instance_variable_set(:@started, true)
+        request = subject.new_request
+        token = request.instance_variable_get(:@token)
+
+        # Let the crashed dispatcher finish its backoff and run its handler.
+        wait_until(timeout: 3) { !crashed.alive? }
+
+        # The healed subscription must survive untouched...
+        expect(subject.instance_variable_get(:@resp_sub)).to equal(healed_sub)
+        expect(subject.started?).to be(true)
+        # ...and the in-flight request must NOT have been cancelled: a teardown
+        # closes every token queue via fail_inflight_requests.
+        entry = subject.instance_variable_get(:@resp_map)[token]
+        expect(entry).not_to be_nil
+        expect(entry[:queue]).not_to be_closed
+
+        subject.instance_variable_get(:@resp_handlers).each(&:kill)
       end
 
       it "spawns a replacement (does not drop to zero) when the sole dispatcher crashes fatally" do

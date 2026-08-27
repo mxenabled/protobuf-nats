@@ -857,18 +857,14 @@ describe ::Protobuf::Nats::Server do
         subject.run
       end
 
-      it "handles subscription manager shutdown timeout" do
+      it "logs and continues when subscription manager shutdown raises" do
         # Mock the run loop to exit immediately
         allow(subject).to receive(:loop)
         allow(subject).to receive(:print_subscription_keys)
         allow(subject).to receive(:subscribe)
         allow(subject).to receive(:unsubscribe)
 
-        # Make shutdown hang (but Timeout will catch it in 10 seconds, which is mocked)
-        allow(subject.subscription_manager).to receive(:shutdown) { sleep 100 }
-
-        # Stub Timeout to trigger immediately instead of waiting 10 seconds
-        allow(Timeout).to receive(:timeout).with(10).and_raise(Timeout::Error)
+        allow(subject.subscription_manager).to receive(:shutdown).and_raise(::RuntimeError, "boom")
 
         # Allow any error logs
         allow(logger).to receive(:error)
@@ -878,8 +874,28 @@ describe ::Protobuf::Nats::Server do
         subject.instance_variable_set(:@running, false)
         subject.run
 
-        # Verify the error was logged
-        expect(logger).to have_received(:error).with(/subscription manager shutdown timed out/i)
+        expect(logger).to have_received(:error).with(/Error during subscription manager shutdown: boom/)
+      end
+
+      # Regression: 0.13.1 removed Timeout.timeout from SuperSubscriptionManager
+      # because its async Thread#raise corrupts the SizedQueue mutex on JRuby,
+      # but left a Timeout.timeout(10) wrapper around the whole shutdown call --
+      # reintroducing the same hazard one frame up. #shutdown self-bounds, so
+      # there must be no Timeout around it.
+      it "does not wrap subscription manager shutdown in Timeout.timeout" do
+        allow(subject).to receive(:loop)
+        allow(subject).to receive(:print_subscription_keys)
+        allow(subject).to receive(:subscribe)
+        allow(subject).to receive(:unsubscribe)
+        allow(subject.subscription_manager).to receive(:shutdown)
+        allow(logger).to receive(:error)
+        allow(logger).to receive(:info)
+        allow(logger).to receive(:warn)
+
+        expect(::Timeout).not_to receive(:timeout)
+
+        subject.instance_variable_set(:@running, false)
+        subject.run
       end
 
       it "handles thread pool shutdown timeout" do

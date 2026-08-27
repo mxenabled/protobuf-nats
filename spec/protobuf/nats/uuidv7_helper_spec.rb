@@ -83,6 +83,19 @@ describe ::Protobuf::Nats::UUIDv7Helper do
       expect(described_class.extract_timestamp("123")).to be_nil
     end
 
+    # String#to_i(16) stops at the first non-hex char and returns 0 instead of
+    # raising, so these used to parse as epoch 0 -- an age of ~56 years, which
+    # #age_in_seconds fed straight into the client.unexpected_message gauge.
+    it "returns nil for a long non-hex token instead of parsing it as epoch 0" do
+      expect(described_class.extract_timestamp("non-uuid-reply-token")).to be_nil
+      expect(described_class.extract_timestamp("some.other.subject.token")).to be_nil
+    end
+
+    it "returns nil for a hex string that is not UUIDv7-shaped" do
+      # Right length, right characters, wrong layout (no version 7 nibble).
+      expect(described_class.extract_timestamp("0123456789abcdef0123456789abcdef")).to be_nil
+    end
+
     it "handles UUIDs without dashes" do
       known_time = Time.utc(2024, 1, 1, 0, 0, 0)
       timestamp_ms = (known_time.to_f * 1000).to_i
@@ -127,6 +140,9 @@ describe ::Protobuf::Nats::UUIDv7Helper do
     it "returns nil for invalid UUIDs" do
       expect(described_class.age_in_seconds("invalid")).to be_nil
       expect(described_class.age_in_seconds(nil)).to be_nil
+      # Regression: a non-UUID reply token reported ~1.7e9 seconds (56 years),
+      # skewing the client.unexpected_message metric.
+      expect(described_class.age_in_seconds("non-uuid-reply-token")).to be_nil
     end
   end
 end

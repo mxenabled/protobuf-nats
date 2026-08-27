@@ -1,7 +1,6 @@
 require "active_support"
 require "active_support/core_ext/class/subclasses"
 require "concurrent"
-require "timeout"
 require "protobuf/rpc/server"
 require "protobuf/rpc/service"
 require "protobuf/nats/thread_pool"
@@ -461,11 +460,18 @@ module Protobuf
 
         logger.info "Shutting down subscription manager..."
         begin
-          Timeout.timeout(10) do
-            subscription_manager.shutdown(5)
-          end
-        rescue Timeout::Error
-          logger.error "Subscription manager shutdown timed out!"
+          # No Timeout.timeout here. #shutdown already bounds itself with a
+          # monotonic deadline and non-blocking pushes, and Timeout's async
+          # Thread#raise is exactly what 0.13.1 removed from the manager: firing
+          # it while a thread holds the SizedQueue mutex leaves JRuby unwinding
+          # through a held mutex ("Attempt to unlock a mutex which is locked by
+          # another thread"), which can then hang the queue for good.
+          #
+          # The wrapper could genuinely fire, too: #shutdown's own worst case
+          # (one 1s push deadline per handler, then a 5s join, then 1s
+          # kill-joins) exceeds 10s once there are more than a few handlers --
+          # the JRuby default is processor_count.
+          subscription_manager.shutdown(5)
         rescue => e
           logger.error "Error during subscription manager shutdown: #{e.message}"
         end

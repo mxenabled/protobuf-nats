@@ -25,6 +25,83 @@ describe ::Protobuf::Nats::ThreadPool do
     end
   end
 
+  describe "work enqueued as shutdown begins" do
+    # #push checks @shutting_down and then enqueues, so #shutdown can push its
+    # poison pills between those two steps. The work then sits BEHIND the pills:
+    # workers used to take a pill and exit, stranding it forever. The server has
+    # already ACKed that request, so its client blocks until response_timeout.
+    it "runs work that lands behind the poison pills instead of stranding it" do
+      pool = described_class.new(2)
+      ran = ::Queue.new
+
+      # Reproduce the interleaving deterministically: shutdown first (pills are
+      # now queued), then enqueue work behind them, bypassing the @shutting_down
+      # guard exactly as a push that already passed the check would.
+      pool.shutdown
+      pool.instance_variable_get(:@active_work).increment
+      pool.instance_variable_get(:@queue) << [:work, lambda { ran << :ran }]
+
+      expect(pool.wait_for_termination(5)).to be(true)
+      expect(ran.size).to eq(1)
+      # ...and the drained work released its slot.
+      expect(pool.size).to eq(0)
+    end
+
+    it "still stops every worker when work is interleaved with the pills" do
+      pool = described_class.new(4)
+      ran = ::Queue.new
+
+      pool.shutdown
+      3.times do
+        pool.instance_variable_get(:@active_work).increment
+        pool.instance_variable_get(:@queue) << [:work, lambda { ran << :ran }]
+      end
+
+      # Every worker must still exit: the drain puts a sibling's pill back
+      # rather than consuming it.
+      expect(pool.wait_for_termination(5)).to be(true)
+      expect(ran.size).to eq(3)
+      expect(pool.size).to eq(0)
+    end
+
+    # The worker drain alone is not enough: if the worker takes its pill and
+    # drains BEFORE the racing push lands, it finds an empty queue and exits,
+    # and the late work is stranded exactly as before. wait_for_termination
+    # drains once more after the last worker is gone.
+    it "runs work that lands after every worker has already exited" do
+      pool = described_class.new(1)
+      ran = ::Queue.new
+
+      pool.shutdown
+      # Let the worker take its pill, drain nothing, and exit first.
+      wait_until(timeout: 3) { pool.instance_variable_get(:@workers).none?(&:alive?) }
+
+      # Only now does the racing push land.
+      pool.instance_variable_get(:@active_work).increment
+      pool.instance_variable_get(:@queue) << [:work, lambda { ran << :ran }]
+
+      expect(pool.wait_for_termination(5)).to be(true)
+      expect(ran.size).to eq(1)
+      expect(pool.size).to eq(0)
+    end
+
+    it "keeps draining after a drained task raises" do
+      pool = described_class.new(1)
+      ran = ::Queue.new
+      pool.on_error { |_error| nil } # swallow the expected error
+
+      pool.shutdown
+      pool.instance_variable_get(:@active_work).increment
+      pool.instance_variable_get(:@queue) << [:work, lambda { raise "boom" }]
+      pool.instance_variable_get(:@active_work).increment
+      pool.instance_variable_get(:@queue) << [:work, lambda { ran << :ran }]
+
+      expect(pool.wait_for_termination(5)).to be(true)
+      expect(ran.size).to eq(1)
+      expect(pool.size).to eq(0)
+    end
+  end
+
   describe "overdue-reclaim raise between tasks" do
     it "survives a HandlerOverdue raised while parked on the queue" do
       pool = described_class.new(1)

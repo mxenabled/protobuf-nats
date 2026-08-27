@@ -1,5 +1,21 @@
 ## Changelog
 
+### 0.13.3.pre1
+Correctness fixes for concurrency bugs found while reviewing the 0.13.1/0.13.2 changes. Every fix ships with a spec verified to fail against the previous code. No API or configuration changes.
+
+#### Byte accounting
+- Fixed permanent upward drift in the `ByteBoundedQueue` byte counter (new in 0.13.2). Bytes were counted *after* the enqueue, so a consumer could pop an item and subtract its bytes first; `pop`'s clamp at zero swallowed that subtraction, and the producer's increment then applied to an item that was already gone. The counter only ratcheted up, so a long-running server eventually reached the 128 MiB ceiling and dropped **every** request while still looking healthy. The server pops the shared queue from `processor_count` handler threads on JRuby, so the race was live on every message. Bytes are now counted before the enqueue and rolled back if it does not happen.
+
+#### Shutdown
+- Work accepted just as shutdown begins is no longer stranded. `ThreadPool#push` checks the shutdown flag and then enqueues, so `shutdown` could slip its poison pills between those two steps; workers took a pill and exited, leaving an already-ACKed request to hang until the client's response timeout (60s default). Workers now drain work queued behind their pill, and `wait_for_termination` drains once more after the last worker exits. Admission and shutdown are still not atomic (`#push` is lock-free by design), but nothing enqueued before the pool reports termination is dropped.
+- Removed the `Timeout.timeout(10)` wrapper around `SuperSubscriptionManager#shutdown` in `Server#run`. 0.13.1 removed `Timeout` from the manager because its async `Thread#raise`, fired while a thread holds the `SizedQueue` mutex, makes JRuby unwind through the held mutex; the wrapper reintroduced that hazard one frame up. It could genuinely fire: `#shutdown` is not bounded by 10s (one 1s push deadline per handler, then a 5s join, then 1s kill-joins). `#shutdown` already self-bounds, so the wrapper is gone along with the now-dead `require "timeout"`.
+
+#### Self-healing
+- A response-muxer dispatcher that crashes now tears down only the subscription it actually died on. Dispatchers that crash together wake on staggered backoffs (1s, then 4s), so a late one destroyed the subscription an earlier one had just rebuilt and, via `fail_inflight_requests`, cancelled every request already waiting on it.
+
+#### Observability
+- `UUIDv7Helper.extract_timestamp` validates the whole token instead of just its length. `String#to_i(16)` stops at the first non-hex character and returns 0 rather than raising, so a foreign reply token parsed as epoch 0 and reported a ~56-year age into the `client.unexpected_message` gauge. Both the dashed and compact (dash-free) UUIDv7 forms are still accepted.
+
 ### 0.13.2
 Bounds the RPC transport's in-memory buffering to prevent the JVM-heap OOM introduced by the JNats → nats-pure migration. Both the client response muxer and the server intake queue are now capped by message count **and** total bytes, dropping (with client retry) rather than buffering unbounded protobuf payloads on the heap.
 

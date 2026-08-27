@@ -1,7 +1,6 @@
 require "active_support"
 require "active_support/core_ext/class/subclasses"
 require "concurrent"
-require "timeout"
 require "protobuf/rpc/server"
 require "protobuf/rpc/service"
 require "protobuf/nats/thread_pool"

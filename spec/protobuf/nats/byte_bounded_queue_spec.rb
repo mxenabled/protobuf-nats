@@ -96,6 +96,64 @@ describe ::Protobuf::Nats::ByteBoundedQueue do
     end
   end
 
+  describe "byte accounting under concurrency (regression)" do
+    # Counting bytes AFTER the enqueue let a consumer pop the object and
+    # subtract its bytes before the producer added them: #pop's clamp at zero
+    # swallowed the subtraction and the producer's later increment became a
+    # permanent overcount. The counter only ratcheted up, so a long-lived
+    # server eventually reported a full queue and dropped every request.
+    it "does not drift upward when producers and consumers run concurrently" do
+      q = described_class.new(64, 100_000_000) # ceilings high enough never to drop
+      message_bytes = 100
+      producers = 8
+      per_producer = 250
+      total = producers * per_producer
+
+      popped = ::Concurrent::AtomicFixnum.new(0)
+      consumers = 8.times.map do
+        ::Thread.new do
+          loop do
+            item = q.pop
+            break if item == :done
+            popped.increment
+          end
+        end
+      end
+
+      producer_threads = producers.times.map do
+        ::Thread.new { per_producer.times { q.push(msg(message_bytes)) } }
+      end
+      producer_threads.each(&:join)
+
+      # Drain, then stop each consumer with its own sentinel.
+      consumers.size.times { q.push(:done) }
+      consumers.each(&:join)
+
+      expect(popped.value).to eq(total)
+      expect(q.size).to eq(0)
+      # The queue is empty, so the byte counter must be exactly zero. Any
+      # phantom bytes here are permanent drift.
+      expect(q.bytesize).to eq(0)
+    end
+
+    it "rolls back the counted bytes when a non-blocking push is rejected" do
+      q = described_class.new(1, 100_000)
+      q.push(msg(500))
+
+      expect { q.push(msg(500), true) }.to raise_error(::ThreadError)
+
+      # The rejected push must leave no trace in the counter.
+      expect(q.size).to eq(1)
+      expect(q.bytesize).to eq(500)
+
+      # ...and the freed headroom must still be usable afterwards.
+      q.pop
+      expect(q.bytesize).to eq(0)
+      q.push(msg(500))
+      expect(q.bytesize).to eq(500)
+    end
+  end
+
   describe "message-count ceiling (inherited SizedQueue)" do
     it "raises ThreadError on a non-blocking push into a count-full queue without counting bytes" do
       q = described_class.new(2, 10_000) # 2-message capacity

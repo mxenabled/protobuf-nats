@@ -1,6 +1,17 @@
 module Protobuf
   module Nats
     class UUIDv7Helper
+      # Strict RFC 9562 UUIDv7 shape, matching what .generate produces. The
+      # strictness matters to callers like the server's stale-request shedding:
+      # treating a non-UUID token (e.g. from a foreign client) as a timestamp
+      # would compute a garbage age.
+      UUIDV7_REGEX = /\A\h{8}-\h{4}-7\h{3}-\h{4}-\h{12}\z/
+
+      # Same shape without dashes. extract_timestamp has always accepted this
+      # form, so validating with the dashed pattern alone would reject tokens
+      # the method documents as supported.
+      UUIDV7_COMPACT_REGEX = /\A\h{12}7\h{3}\h{4}\h{12}\z/
+
       # Generate a UUIDv7 string without a CSPRNG. Callers that only need a
       # 48-bit millisecond timestamp prefix (so #age_in_seconds can report a
       # value) plus enough randomness to stay unique among concurrent generators
@@ -27,17 +38,23 @@ module Protobuf
       # Extract the Unix timestamp (in seconds) from a UUIDv7 string
       # Returns nil if the UUID cannot be parsed
       #
+      # Validates the whole token, not just its length. String#to_i(16) stops at
+      # the first non-hex character and returns 0 rather than raising, so a
+      # non-UUID reply token ("non-uuid-reply-token") used to parse as epoch 0
+      # and report an age of ~56 years -- which #age_in_seconds then fed
+      # straight into the client.unexpected_message gauge.
+      #
       # @param uuid [String] A UUIDv7 string (e.g., "01234567-89ab-7def-0123-456789abcdef")
       # @return [Time, nil] The timestamp embedded in the UUID, or nil if parsing fails
       def self.extract_timestamp(uuid)
         return nil unless uuid.is_a?(String)
+        return nil unless uuid.match?(UUIDV7_REGEX) || uuid.match?(UUIDV7_COMPACT_REGEX)
 
         # UUIDv7 format: first 48 bits (12 hex chars) are Unix timestamp in milliseconds
         # Remove dashes and extract the timestamp portion
-        uuid_bytes = uuid.gsub('-', '')
-        return nil if uuid_bytes.length < 12
+        uuid_bytes = uuid.tr('-', '')
 
-        timestamp_ms = uuid_bytes[0...12].to_i(16)
+        timestamp_ms = uuid_bytes[0, 12].to_i(16)
         Time.at(timestamp_ms / 1000.0)
       rescue => e
         nil
@@ -56,11 +73,6 @@ module Protobuf
         current_time - timestamp
       end
 
-      # Strict RFC 9562 UUIDv7 shape, matching what .generate produces. The
-      # strictness matters to callers like the server's stale-request shedding:
-      # extract_timestamp is permissive, and treating a non-UUID token (e.g.
-      # from a foreign client) as a timestamp would compute a garbage age.
-      UUIDV7_REGEX = /\A\h{8}-\h{4}-7\h{3}-\h{4}-\h{12}\z/
 
       # Age (integer ms) of a strictly-validated UUIDv7 token, or nil for a
       # non-UUIDv7 token. Allocation-light: runs per message on the server's

@@ -37,6 +37,10 @@ module Protobuf
       # immediately on every engine; next_message treats it as a timeout.
       QUEUE_WAKE = ::Object.new
 
+      # Thread-local key naming the subscription a dispatcher is currently
+      # draining (see run_dispatch_loop / spawn_dispatcher).
+      DISPATCHING_SUB_KEY = :pb_nats_dispatching_sub
+
       def initialize
         # Per-token response queues for lock-free message delivery. @resp_map is a
         # Concurrent::Map so request threads and dispatcher threads can insert,
@@ -481,7 +485,27 @@ module Protobuf
               # the muxer would stop delivering responses entirely).
               @resp_handlers.delete(::Thread.current)
 
-              drop_subscription_locked("during self-healing")
+              # Only tear down the subscription we actually died on. When several
+              # dispatchers crash together they wake on different backoffs (1s,
+              # then 4s...), so an unconditional teardown here would destroy the
+              # subscription an earlier sibling just rebuilt and, via
+              # fail_inflight_requests, cancel every request that had already
+              # arrived on it. If a sibling healed us, our subscription is stale
+              # and start's top-up below is all that is left to do.
+              #
+              # DISPATCHING_SUB_KEY is written by run_dispatch_loop on this same
+              # thread, so it names the subscription this dispatcher was really
+              # draining. Capturing @resp_sub here (or when the thread starts)
+              # would instead read whatever is current after the backoff, which
+              # is exactly the value we need to compare against. A nil value
+              # means we died before draining anything, so there is nothing of
+              # ours to tear down.
+              dispatching_sub = ::Thread.current[DISPATCHING_SUB_KEY]
+              if @resp_sub.nil? || @resp_sub.equal?(dispatching_sub)
+                drop_subscription_locked("during self-healing")
+              else
+                logger.info "ResponseMuxer already healed by another dispatcher; rejoining the pool without a teardown"
+              end
             end
             start
           end
@@ -500,6 +524,11 @@ module Protobuf
               sleep 0.01
               next
             end
+
+            # Record what we are draining for the crash handler in
+            # spawn_dispatcher. Thread-local, so each dispatcher tracks its own
+            # subscription across restarts (a shared ivar could not).
+            ::Thread.current[DISPATCHING_SUB_KEY] = sub
 
             msg = sub.pending_queue.pop
 

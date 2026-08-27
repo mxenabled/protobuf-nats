@@ -7,6 +7,7 @@ ENV["PB_NATS_RESPONSE_MUXER_DISPATCHERS"] ||= "1"
 
 require "bundler/setup"
 require "socket"
+require "timeout"
 require "protobuf/nats"
 require "fake_nats_client"
 require "pry"

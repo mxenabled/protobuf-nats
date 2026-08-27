@@ -80,7 +80,15 @@ module Protobuf
         deadline = seconds && (::Protobuf::Nats.monotonic_time + seconds)
         loop do
           @mutex.synchronize { prune_dead_workers }
-          return true if @workers.empty?
+          if @workers.empty?
+            # Workers drain what is behind their poison pill, but a push that
+            # had already passed the @shutting_down check can land after the
+            # last worker has drained and exited. Nothing would ever run it,
+            # and the server has already ACKed it. Run it here, on the caller's
+            # thread, now that no worker is left to race us.
+            drain_remaining_work
+            return true
+          end
           return false if deadline && ::Protobuf::Nats.monotonic_time >= deadline
           sleep 0.1
         end
@@ -130,6 +138,40 @@ module Protobuf
         end
       end
 
+      # Run any :work left in the queue behind a poison pill, then stop. Called
+      # by a worker that has taken its pill, and once more by
+      # #wait_for_termination after the last worker exits (a push that already
+      # passed the @shutting_down check can land after every worker has gone).
+      #
+      # This does not make admission and shutdown atomic -- #push is lock-free
+      # by design, so work can still arrive after the final drain. It closes the
+      # window that matters: everything enqueued up to the moment the pool
+      # reports termination runs, so no ACKed request is silently dropped.
+      def drain_remaining_work
+        loop do
+          begin
+            type, cb = @queue.pop(true) # non_block: empty queue ends the drain
+          rescue ::ThreadError
+            break
+          end
+
+          # Another worker's pill: put it back so that worker still exits, and
+          # stop draining (the remaining pills are theirs, not ours).
+          if type == :stop
+            @queue << [:stop, nil]
+            break
+          end
+
+          begin
+            cb.call
+          rescue => error
+            @cb_mutex.synchronize { @error_cb.call(error) }
+          ensure
+            @active_work.decrement
+          end
+        end
+      end
+
       def spawn_worker
         ::Thread.new do
           Thread.current.name = "thread-pool-worker"
@@ -146,7 +188,19 @@ module Protobuf
             # The :stop poison pill never claimed an @active_work slot (see
             # #shutdown), so it must not reach the ensure below -- decrementing
             # for it drove the counter negative at shutdown.
-            break if type == :stop
+            if type == :stop
+              # #push admits work by checking @shutting_down and then enqueueing,
+              # so #shutdown can slip its pills in between those two steps and
+              # leave real work sitting BEHIND them. Exiting here would strand
+              # that work forever -- and the server has already published an ACK
+              # for it, so its client blocks until response_timeout (60s).
+              #
+              # Drain what is behind us before leaving. Pop non-blocking so an
+              # empty queue ends the drain immediately; hand any sibling's pill
+              # back so every worker still gets one.
+              drain_remaining_work
+              break
+            end
 
             begin
               cb.call
